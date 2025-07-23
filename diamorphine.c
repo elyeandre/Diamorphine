@@ -32,6 +32,10 @@
 
 #include "diamorphine.h"
 
+// Define kallsyms_lookup_name ourselves
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+static kallsyms_lookup_name_t my_kallsyms_lookup_name = NULL;
+
 static int __init resolve_kallsyms(void)
 {
     struct kprobe kp = {
